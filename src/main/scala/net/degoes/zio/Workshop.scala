@@ -1,6 +1,12 @@
 package net.degoes.zio
 
+import java.io.IOException
+
+import net.degoes.zio.PromptName.StdInputFailed
 import zio._
+import zio.duration.Duration.Finite
+
+import scala.util.{Failure, Success, Try}
 
 object HelloWorld extends App {
   import zio.console._
@@ -11,7 +17,7 @@ object HelloWorld extends App {
     * Implement a simple "Hello World" program using the effect returned by `putStrLn`.
     */
   def run(args: List[String]): ZIO[ZEnv, Nothing, Int] =
-    ZIO.succeed(0)
+    putStrLn("Hello").as(0)
 }
 
 object ErrorConversion extends App {
@@ -30,7 +36,8 @@ object ErrorConversion extends App {
     * Using `ZIO#orElse` or `ZIO#fold`, have the `run` function compose the
     * preceding `failed` effect into the effect that `run` returns.
     */
-  def run(args: List[String]): ZIO[ZEnv, Nothing, Int] = ???
+  def run(args: List[String]): ZIO[ZEnv, Nothing, Int] =
+    failed.fold(e => StdInputFailed, _ => 0)
 }
 
 object PromptName extends App {
@@ -44,7 +51,12 @@ object PromptName extends App {
     * Implement a simple program that asks the user for their name (using
     * `getStrLn`), and then prints it out to the user (using `putStrLn`).
     */
-  def run(args: List[String]): ZIO[ZEnv, Nothing, Int] = ???
+  def run(args: List[String]): ZIO[ZEnv, Nothing, Int] =
+    (for {
+      _ <- putStrLn("What's your name")
+      name <- getStrLn
+      _ <- putStrLn(s"Hello, $name")
+    } yield ()).fold(_ => StdInputFailed, _ => 0)
 }
 
 object ZIOTypes {
@@ -55,11 +67,11 @@ object ZIOTypes {
     *
     * Provide definitions for the ZIO type aliases below.
     */
-  type Task[+A] = ???
-  type UIO[+A] = ???
-  type RIO[-R, +A] = ???
-  type IO[+E, +A] = ???
-  type URIO[-R, +A] = ???
+  type Task[+A] = ZIO[Any, Throwable, A]
+  type UIO[+A] = ZIO[Any, Nothing, A]
+  type RIO[-R, +A] = ZIO[R, Throwable, A]
+  type IO[+E, +A] = ZIO[Any, E, A]
+  type URIO[-R, +A] = ZIO[R, Nothing, A]
 }
 
 object NumberGuesser extends App {
@@ -76,8 +88,17 @@ object NumberGuesser extends App {
     * Choose a random number (using `nextInt`), and then ask the user to guess
     * the number, feeding their response to `analyzeAnswer`, above.
     */
-  def run(args: List[String]): ZIO[ZEnv, Nothing, Int] =
-    ???
+  def run(args: List[String]): ZIO[ZEnv, Nothing, Int] = {
+    val game: ZIO[Console with Random, IOException, Unit] = for {
+      num <- ZIO.accessM[Random](_.random.nextInt)
+      _ <- putStrLn("Guess")
+      guess <- ZIO.accessM[Console](_.console.getStrLn)
+      _ <- analyzeAnswer(num, guess)
+    } yield ()
+
+    game.fold(_ => 1, _ => 0)
+  }
+
 }
 
 object AlarmApp extends App {
@@ -93,12 +114,22 @@ object AlarmApp extends App {
     */
   lazy val getAlarmDuration: ZIO[Console, IOException, Duration] = {
     def parseDuration(input: String): IO[NumberFormatException, Duration] =
-      ???
+      Try(Duration.fromNanos((input.toDouble * 1000000000L).toLong)) match {
+        case Success(duration)                 => ZIO.succeed(duration)
+        case Failure(e: NumberFormatException) => ZIO.fail(e)
+        case Failure(_)                        => ZIO.fail(new NumberFormatException())
+      }
 
     def fallback(input: String): ZIO[Console, IOException, Duration] =
-      ???
+      putStrLn(s"Not correct number: $input") *> getAlarmDuration
 
-    ???
+    for {
+      _ <- putStrLn("Please, type in a decimal number of seconds")
+      input <- getStrLn
+      duration <- parseDuration(input)
+        .foldM(_ => fallback(input), a => ZIO.succeed(a))
+    } yield duration
+
   }
 
   /**
@@ -109,7 +140,13 @@ object AlarmApp extends App {
     * alarm message.
     */
   def run(args: List[String]): ZIO[ZEnv, Nothing, Int] =
-    ???
+    (for {
+      d <- getAlarmDuration
+      _ <- putStrLn(s"Will sleep for $d")
+      _ <- ZIO.unit.delay(d)
+      _ <- putStrLn(s"TADA!")
+    } yield ()).fold(_ => 1, _ => 0)
+
 }
 
 object Cat extends App {
@@ -174,10 +211,7 @@ object ComputePi extends App {
     * Some state to keep track of all points inside a circle,
     * and total number of points.
     */
-  final case class PiState(
-      inside: Ref[Long],
-      total: Ref[Long]
-  )
+  final case class PiState(inside: Ref[Long], total: Ref[Long])
 
   /**
     * A function to estimate pi.
@@ -339,7 +373,9 @@ object TicTacToe extends App {
     final def place(row: Int, col: Int, mark: Mark): Option[Board] =
       if (row >= 0 && col >= 0 && row < 3 && col < 3)
         Some(
-          copy(value = value.updated(row, value(row).updated(col, Some(mark))))
+          copy(
+            value = value.updated(row, value(row).updated(col, Some(mark)))
+          )
         )
       else None
 
@@ -418,11 +454,7 @@ object TicTacToe extends App {
   }
 
   val TestBoard = Board
-    .fromChars(
-      List(' ', 'O', 'X'),
-      List('O', 'X', 'O'),
-      List('X', ' ', ' ')
-    )
+    .fromChars(List(' ', 'O', 'X'), List('O', 'X', 'O'), List('X', ' ', ' '))
     .get
     .render
 
