@@ -1,9 +1,14 @@
 package net.degoes.zio
 
 import java.io.IOException
+import java.nio.file.{Files, Paths}
 
 import net.degoes.zio.PromptName.StdInputFailed
-import zio._
+import org.w3c.dom.css.CSSUnknownRule
+import zio.ZSchedule.Decision
+import zio.{ZSchedule, _}
+import zio.console.putStrLn
+import zio.duration.Duration
 import zio.duration.Duration.Finite
 
 import scala.util.{Failure, Success, Try}
@@ -160,7 +165,13 @@ object Cat extends App {
     * Implement a function to read a file on the blocking thread pool, storing
     * the result into a string.
     */
-  def readFile(file: String): ZIO[Blocking, IOException, String] = ???
+  def readFile(file: String): ZIO[Blocking, IOException, String] = {
+    val read = ZIO
+      .effect(Files.readAllBytes(Paths.get(file)))
+      .map(new String(_))
+      .refineOrDie[IOException] { case e: IOException => e }
+    blocking(read)
+  }
 
   /**
     * EXERCISE 9
@@ -168,8 +179,15 @@ object Cat extends App {
     * Implement a version of the command-line utility "cat", which dumps the
     * contents of the specified file to standard output.
     */
-  def run(args: List[String]): ZIO[ZEnv, Nothing, Int] =
-    ???
+  def run(args: List[String]): ZIO[ZEnv, Nothing, Int] = {
+    (args match {
+      case head :: Nil =>
+        readFile(head)
+          .flatMap(putStrLn)
+          .flatMapError(e => putStrLn(s"Error: ${e}"))
+      case _ => ZIO.effectTotal(println("Usage: cat [filename]"))
+    }).fold(_ => 1, _ => 0)
+  }
 }
 
 object CatIncremental extends App {
@@ -184,12 +202,33 @@ object CatIncremental extends App {
     * the blocking thread pool.
     */
   final case class FileHandle private (private val is: InputStream) {
-    final def close: ZIO[Blocking, IOException, Unit] = ???
 
-    final def read: ZIO[Blocking, IOException, Option[Chunk[Byte]]] = ???
+    final def close: ZIO[Blocking, IOException, Unit] =
+      blocking(ZIO.effect(is.close())).refineOrDie { case e: IOException => e }
+
+    final def read: ZIO[Blocking, IOException, Option[Chunk[Byte]]] = {
+      val buf = new Array[Byte](100)
+
+      def readNextChunk(initial: Option[Chunk[Byte]]): Option[Chunk[Byte]] =
+        is.read(buf) match {
+          case -1 => initial
+          case n =>
+            val data = Chunk.fromArray(buf.dropRight(100 - n))
+            val all = initial match {
+              case None => Some(data)
+              case some => some.map(_ ++ data)
+            }
+            readNextChunk(all)
+        }
+      blocking(ZIO.effect(readNextChunk(None)))
+        .refineOrDie { case e: IOException => e }
+    }
   }
   object FileHandle {
-    final def open(file: String): ZIO[Blocking, IOException, FileHandle] = ???
+    final def open(file: String): ZIO[Blocking, IOException, FileHandle] =
+      blocking(ZIO.effect(FileHandle(new FileInputStream(file)))).refineOrDie {
+        case e: IOException => e
+      }
   }
 
   /**
@@ -200,7 +239,20 @@ object CatIncremental extends App {
     * interruption.
     */
   def run(args: List[String]): ZIO[ZEnv, Nothing, Int] =
-    ???
+    (args match {
+      case head :: Nil =>
+        FileHandle
+          .open(head)
+          .bracket(fh => fh.close.catchAll(_ => ZIO.unit)) {
+            (handle: FileHandle) =>
+              handle.read.flatMap {
+                case None    => putStrLn("File empty")
+                case Some(c) => putStrLn(new String(c.toArray[Byte]))
+              }
+          }
+          .flatMapError(e => putStrLn(s"Error: ${e}"))
+      case _ => ZIO.effectTotal(println("Usage: cat [filename]"))
+    }).fold(_ => 1, _ => 0)
 }
 
 object ComputePi extends App {
@@ -238,8 +290,60 @@ object ComputePi extends App {
     * Build a multi-fiber program that estimates the value of `pi`. Print out
     * ongoing estimates continuously until the estimation is complete.
     */
-  def run(args: List[String]): ZIO[ZEnv, Nothing, Int] =
-    ???
+  def run(args: List[String]): ZIO[ZEnv, Nothing, Int] = {
+
+    def untilPrecisionReached(state: PiState, precision: Double) = new Schedule[Unit, Unit] {
+      override type State = PiState
+      override val initial: ZIO[Any, Nothing, PiState] = ZIO.succeed(state)
+      override val update: (
+          Unit,
+          State
+      ) => ZIO[Any, Nothing, ZSchedule.Decision[State, Unit]] = (_, _) =>
+        for {
+          inside <- state.inside.get
+          total <- state.total.get
+          currentError = Math.abs(estimatePi(inside, total) - Math.PI)
+        } yield Decision(
+          currentError > precision,
+          Duration.Zero,
+          state,
+          () => ()
+        )
+    }
+
+    def addPoint(name: String, state: PiState): ZIO[ZEnv, Nothing, Unit] =
+      for {
+        hit <- randomPoint.map { case (x, y) => insideCircle(x, y) }
+        total <- state.total.update(_ + 1)
+        inside <- state.inside.update(n => if (hit) n + 1 else n)
+        _ <- putStrLn(s"$name:$total: ${estimatePi(inside, total)}")
+      } yield ()
+
+    def runners(
+        countRunners: Int
+    ): ZIO[zio.ZEnv, Nothing, Unit] =
+      for {
+        insideRef <- Ref.make(0L)
+        totalRef <- Ref.make(0L)
+        state = PiState(insideRef, totalRef)
+        runners <- (0 until countRunners)
+          .map(
+            i => addPoint(s"R$i", state).repeat(untilPrecisionReached(state, 0.0001)).as(())
+          )
+          .reduce { (a, b) =>
+            a.zipPar(b).as(())
+          }
+        insideFinal <- insideRef.get
+        totalFinal <- totalRef.get
+
+        _ <- putStrLn(
+          s"Result: ${estimatePi(insideFinal, totalFinal)} in $totalFinal iteratiions"
+        )
+      } yield runners
+
+    runners(10).fold(_ => 1, _ => 0)
+  }
+
 }
 
 object Hangman extends App {
