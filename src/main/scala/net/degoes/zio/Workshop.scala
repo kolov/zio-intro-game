@@ -292,32 +292,32 @@ object ComputePi extends App {
     */
   def run(args: List[String]): ZIO[ZEnv, Nothing, Int] = {
 
-    def untilPrecisionReached(state: PiState, precision: Double) = new Schedule[Unit, Unit] {
-      override type State = PiState
-      override val initial: ZIO[Any, Nothing, PiState] = ZIO.succeed(state)
-      override val update: (
-          Unit,
-          State
-      ) => ZIO[Any, Nothing, ZSchedule.Decision[State, Unit]] = (_, _) =>
-        for {
-          inside <- state.inside.get
-          total <- state.total.get
-          currentError = Math.abs(estimatePi(inside, total) - Math.PI)
-        } yield Decision(
-          currentError > precision,
-          Duration.Zero,
-          state,
-          () => ()
-        )
-    }
+    def untilPrecisionReached(precision: Double) =
+      new Schedule[Double, Double] {
+        override type State = Unit
+        override val initial: ZIO[Any, Nothing, Unit] = ZIO.succeed(())
+        override val update: (
+            Double,
+            State
+        ) => ZIO[Any, Nothing, ZSchedule.Decision[State, Double]] =
+          (estimate, _) =>
+            ZIO.succeed(
+              Decision(
+                Math.abs(estimate - Math.PI) > precision,
+                Duration.Zero,
+                (),
+                () => estimate
+              )
+            )
+      }
 
-    def addPoint(name: String, state: PiState): ZIO[ZEnv, Nothing, Unit] =
+    def addPoint(name: String, state: PiState): ZIO[ZEnv, Nothing, Double] =
       for {
         hit <- randomPoint.map { case (x, y) => insideCircle(x, y) }
         total <- state.total.update(_ + 1)
         inside <- state.inside.update(n => if (hit) n + 1 else n)
         _ <- putStrLn(s"$name:$total: ${estimatePi(inside, total)}")
-      } yield ()
+      } yield estimatePi(inside, total)
 
     def runners(
         countRunners: Int
@@ -328,7 +328,10 @@ object ComputePi extends App {
         state = PiState(insideRef, totalRef)
         runners <- (0 until countRunners)
           .map(
-            i => addPoint(s"R$i", state).repeat(untilPrecisionReached(state, 0.0001)).as(())
+            i =>
+              addPoint(s"R$i", state)
+                .repeat(untilPrecisionReached(0.0001))
+                .as(())
           )
           .reduce { (a, b) =>
             a.zipPar(b).as(())
