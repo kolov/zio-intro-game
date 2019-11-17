@@ -360,7 +360,9 @@ object Hangman extends App {
     * Implement an effect that gets a single, lower-case character from
     * the user.
     */
-  lazy val getChoice: ZIO[Console, IOException, Char] = ???
+  lazy val getChoice: ZIO[Console, IOException, Char] = getStrLn.flatMap { s =>
+    s.headOption.map(ZIO.succeed(_)).getOrElse(getChoice)
+  }
 
   /**
     * EXERCISE 14
@@ -368,14 +370,18 @@ object Hangman extends App {
     * Implement an effect that prompts the user for their name, and
     * returns it.
     */
-  lazy val getName: ZIO[Console, IOException, String] = ???
+  lazy val getName: ZIO[Console, IOException, String] = putStrLn(
+    "What is your name?"
+  ) *> getStrLn
 
   /**
     * EXERCISE 15
     *
     * Implement an effect that chooses a random word from the dictionary.
     */
-  lazy val chooseWord: ZIO[Random, Nothing, String] = ???
+  lazy val chooseWord: ZIO[Random, Nothing, String] =
+    nextInt(dictionary.size).map(dictionary.drop(_).head)
+  private val dictionary: List[String] = Dictionary.Dictionary
 
   /**
     * EXERCISE 17
@@ -383,7 +389,18 @@ object Hangman extends App {
     * Implement the main game loop, which gets choices from the user until
     * the game is won or lost.
     */
-  def gameLoop(ref: Ref[State]): ZIO[Console, IOException, Unit] = ???
+  def gameLoop(ref: Ref[State]): ZIO[Console, IOException, Unit] =
+    for {
+      initial <- ref.get
+      _ <- putStrLn("Please, guess!")
+      guess <- getChoice
+      state <- ref.update(_.addChar(guess))
+      result = guessResult(initial, state, guess)
+      _ <- putStrLn(s"$result")
+      _ <- renderState(state)
+      _ <- if (state.playerLost || state.playerWon) ZIO.unit
+      else gameLoop(ref)
+    } yield ()
 
   def renderState(state: State): ZIO[Console, Nothing, Unit] = {
 
@@ -442,7 +459,12 @@ object Hangman extends App {
     * and the above helper functions.
     */
   def run(args: List[String]): ZIO[ZEnv, Nothing, Int] =
-    ???
+    (for {
+      name <- getName
+      word <- chooseWord
+      state <- Ref.make(State(name, Set.empty, word))
+      _ <- gameLoop(state)
+    } yield ()).fold(_ => 1, _ => 0)
 }
 
 /**
